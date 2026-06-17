@@ -2,9 +2,9 @@
 
 Home Assistant custom integration for MG iSmart India connected vehicles.
 
-This is a read-only integration. It authenticates against the India MG iSmart
-cloud, lists vehicles, and decodes the India-specific TAP protocol 513 vehicle
-status response.
+It authenticates against the India MG iSmart cloud, lists vehicles, decodes the
+India-specific TAP protocol 513 vehicle status response, and exposes remote
+controls supported by each vehicle's model configuration.
 
 ## Current Entities
 
@@ -26,6 +26,13 @@ status response.
 - Lock state
 - Door, boot, bonnet, and window state
 - Remote climate and CAN bus activity
+- Climate on/off
+- Door lock/unlock
+- Supported windows
+- Sunroof when fitted
+- Find-my-car horn and lights
+- Tailgate release when supported
+- Front heated-seat levels when fitted
 
 ## Installation
 
@@ -36,7 +43,12 @@ from **Settings > Devices & services**.
 ## Notes
 
 - Use the 10-digit India mobile number associated with the MG iSmart account.
-- Controls and vehicle location are intentionally not exposed.
+- Remote controls require the vehicle-control PIN. New installations verify it
+  during setup. Existing installations can add or replace it using the
+  integration's **Configure** action. Only a one-way hash is stored.
+- Control entities are created dynamically from the vehicle's reported model
+  configuration; unsupported hardware is not exposed.
+- Vehicle location is intentionally not exposed.
 - Tyre pressure and charging details remain unavailable until their separate
   India encodings are validated.
 - This project is independent from the generic MG SAIC integration because the

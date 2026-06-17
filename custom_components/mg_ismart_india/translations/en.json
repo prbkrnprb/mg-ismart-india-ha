@@ -15,15 +15,38 @@
         "data": {
           "vin": "Vehicle"
         }
+      },
+      "control_pin": {
+        "title": "Vehicle control",
+        "description": "Enter the vehicle-control PIN used by the MG iSmart app. The PIN is verified once and only its one-way hash is stored.",
+        "data": {
+          "pin": "Vehicle-control PIN"
+        }
       }
     },
     "error": {
       "auth": "Authentication failed.",
       "cannot_connect": "Could not connect to MG iSmart India.",
-      "no_vehicles": "No vehicles were returned for this account."
+      "no_vehicles": "No vehicles were returned for this account.",
+      "invalid_pin": "The vehicle-control PIN was rejected."
     },
     "abort": {
       "already_configured": "This vehicle is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Vehicle control",
+        "description": "Enter the vehicle-control PIN used by the MG iSmart app. Only a one-way hash is stored.",
+        "data": {
+          "pin": "Vehicle-control PIN"
+        }
+      }
+    },
+    "error": {
+      "invalid_pin": "The vehicle-control PIN was rejected.",
+      "cannot_connect": "Could not connect to MG iSmart India."
     }
   }
 }

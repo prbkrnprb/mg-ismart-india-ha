@@ -36,12 +36,33 @@ OTARVMVehicleStatusReq ::= SEQUENCE
   vehStatusReqType INTEGER(0..255)
 }
 
+OTARVCReq ::= SEQUENCE
+{
+  rvcReqType OCTET STRING(SIZE(1)),
+  rvcParams SEQUENCE SIZE(1..10) OF RvcReqParam OPTIONAL
+}
+
+RvcReqParam ::= SEQUENCE
+{
+  paramId INTEGER(0..65535),
+  paramValue OCTET STRING(SIZE(1..255))
+}
+
 OTARVMVehicleStatusResp513 ::= SEQUENCE
 {
   statusTime INTEGER(0..2147483647),
   gpsPosition RvsPosition,
   basicVehicleStatus RvsBasicStatus513,
   extendedVehicleStatus RvsExtStatus OPTIONAL
+}
+
+OTARVCStatus513 ::= SEQUENCE
+{
+  rvcReqType OCTET STRING(SIZE(1)),
+  rvcReqSts OCTET STRING(SIZE(1)),
+  failureType INTEGER(0..255) OPTIONAL,
+  gpsPosition RvsPosition,
+  basicVehicleStatus RvsBasicStatus513
 }
 
 RvsPosition ::= SEQUENCE

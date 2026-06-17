@@ -21,6 +21,8 @@ import httpx
 from .bitcodec import BitReader, read_fixed_7bit_string, set_bits, set_fixed_7bit_string
 from .const import (
     GATEWAY_BASE_URL,
+    CONTROL_POLL_ATTEMPTS,
+    CONTROL_POLL_DELAY,
     STATUS_POLL_ATTEMPTS,
     STATUS_POLL_DELAY,
     TAP_LOGIN_URL,
@@ -28,6 +30,12 @@ from .const import (
     USER_AGENT,
 )
 from .tap_codec import TapCodecError, decode_status_response, encode_status_request
+from .tap_codec import (
+    decode_control_response,
+    decode_pin_verification_response,
+    encode_control_request,
+    encode_pin_verification_request,
+)
 
 LOGGER = logging.getLogger(__package__)
 
@@ -79,6 +87,7 @@ class MgIndiaVehicleStatus:
     rear_left_window_open: bool | None
     rear_right_window_open: bool | None
     climate_running: bool | None
+    sunroof_open: bool | None
     can_bus_active: bool | None
 
 
@@ -106,21 +115,33 @@ class MgIndiaClient:
         password: str,
         *,
         vin: str | None = None,
+        pin_hash: str | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._phone = normalize_phone(phone)
         self._password = password
         self._vin = vin
+        self._pin_hash = pin_hash
         self._http = http_client or httpx.AsyncClient(timeout=30)
         self._owns_http = http_client is None
         self._token: str | None = None
         self._user_id: str | None = None
         self._device_id = make_device_id(self._phone)
         self._last_vehicle_status: MgIndiaVehicleStatus | None = None
+        self._heated_seat_levels = {"driver": 0, "passenger": 0}
 
     @property
     def vin(self) -> str | None:
         return self._vin
+
+    @property
+    def has_control_pin(self) -> bool:
+        return self._pin_hash is not None
+
+    def heated_seat_level(self, side: str) -> int:
+        """Return the last requested heated-seat level."""
+
+        return self._heated_seat_levels[side]
 
     async def close(self) -> None:
         if self._owns_http:
@@ -221,6 +242,197 @@ class MgIndiaClient:
                 raise MgIndiaApiError("Vehicle status was not ready after polling")
         raise MgIndiaApiError("Unable to refresh TAP status session")
 
+    async def verify_control_pin(self, pin_hash: str | None = None) -> None:
+        """Verify the locally hashed vehicle-control PIN."""
+
+        await self._ensure_login()
+        selected_hash = pin_hash or self._pin_hash
+        if selected_hash is None:
+            raise MgIndiaApiError("A vehicle-control PIN has not been configured")
+        if not re.fullmatch(r"[0-9A-F]{32}", selected_hash):
+            raise MgIndiaApiError("Invalid vehicle-control PIN hash")
+        if self._token is None or self._user_id is None or self._vin is None:
+            raise MgIndiaApiError("Vehicle-control session is incomplete")
+        try:
+            body = await asyncio.to_thread(
+                encode_pin_verification_request,
+                self._user_id,
+                self._token,
+                self._vin,
+                selected_hash,
+            )
+        except TapCodecError as err:
+            raise MgIndiaApiError(str(err)) from err
+        response = await self._http.post(
+            TAP_LOGIN_URL, content=body, headers=tap_headers(body)
+        )
+        response.raise_for_status()
+        try:
+            dispatcher = decode_pin_verification_response(response.text)
+        except TapCodecError as err:
+            raise MgIndiaApiError(str(err)) from err
+        result = dispatcher.get("result", 0)
+        if result != 0:
+            message = dispatcher.get("errorMessage")
+            if isinstance(message, bytes):
+                message = message.decode(errors="replace")
+            raise MgIndiaApiError(message or f"PIN verification failed ({result})")
+
+    async def control_climate(self, *, turn_on: bool) -> None:
+        """Turn the remote climate system on or off."""
+
+        params = (
+            [(19, b"\x03"), (20, b"\x03"), (255, b"\x00")]
+            if turn_on
+            else [(19, b"\x00"), (20, b"\x00"), (255, b"\x00")]
+        )
+        await self._execute_control("Climate", 6, params)
+
+    async def control_door_lock(self, *, lock: bool) -> None:
+        """Lock or unlock all vehicle doors."""
+
+        params = (
+            None
+            if lock
+            else [
+                (4, b"\x00"),
+                (5, b"\x00"),
+                (6, b"\x00"),
+                (7, b"\x03"),
+                (255, b"\x00"),
+            ]
+        )
+        await self._execute_control("Door lock", 1 if lock else 2, params)
+
+    async def release_tailgate(self) -> None:
+        """Release the vehicle tailgate."""
+
+        await self._execute_control(
+            "Tailgate",
+            2,
+            [(4, b"\x00"), (5, b"\x00"), (6, b"\x00"), (7, b"\x02"), (255, b"\x00")],
+        )
+
+    async def control_windows(
+        self, *, open_windows: bool, window_param_ids: tuple[int, ...]
+    ) -> None:
+        """Open or close the model-supported windows."""
+
+        selected = set(window_param_ids)
+        params = [
+            (param_id, b"\x01" if param_id in selected else b"\x00")
+            for param_id in (8, 9, 10, 11, 12)
+        ]
+        params.append((13, b"\x03" if open_windows else b"\x00"))
+        await self._execute_control("Windows", 3, params)
+
+    async def control_sunroof(self, *, open_sunroof: bool) -> None:
+        """Open or close the sunroof."""
+
+        params = [
+            (8, b"\x01"),
+            (9, b"\x00"),
+            (10, b"\x00"),
+            (11, b"\x00"),
+            (12, b"\x00"),
+            (13, b"\x03" if open_sunroof else b"\x00"),
+        ]
+        await self._execute_control("Sunroof", 3, params)
+
+    async def find_my_car(self, *, stop: bool = False) -> None:
+        """Start or stop the vehicle horn-and-lights locator."""
+
+        enabled = b"\x00" if stop else b"\x01"
+        await self._execute_control(
+            "Find my car",
+            0,
+            [(1, enabled), (2, enabled), (3, enabled), (255, b"\x00")],
+        )
+
+    async def control_heated_seats(
+        self, *, driver_level: int, passenger_level: int
+    ) -> None:
+        """Set front heated-seat levels."""
+
+        if driver_level not in range(4) or passenger_level not in range(4):
+            raise MgIndiaApiError("Heated-seat levels must be between 0 and 3")
+        await self._execute_control(
+            "Heated seats",
+            5,
+            [
+                (17, bytes((driver_level,))),
+                (18, bytes((passenger_level,))),
+                (255, b"\x00"),
+            ],
+        )
+        self._heated_seat_levels.update(driver=driver_level, passenger=passenger_level)
+
+    async def _execute_control(
+        self,
+        action: str,
+        request_type: int,
+        params: list[tuple[int, bytes]] | None,
+    ) -> None:
+        """Verify the PIN and poll a remote-control command to completion."""
+
+        if self._vin is None:
+            await self.vehicles()
+        await self.verify_control_pin()
+        if self._vin is None:
+            raise MgIndiaApiError("No vehicle selected")
+        event_id = 0
+        for attempt in range(CONTROL_POLL_ATTEMPTS):
+            dispatcher, control = await self._control_request(
+                self._vin, event_id, request_type, params or []
+            )
+            result = dispatcher.get("result", 0)
+            if control is not None:
+                if control.get("rvcReqSts") != b"\x02":
+                    failure = control.get("failureType")
+                    raise MgIndiaApiError(f"{action} command failed ({failure})")
+                return
+            if result not in (0, 4, 6):
+                message = dispatcher.get("errorMessage")
+                if isinstance(message, bytes):
+                    message = message.decode(errors="replace")
+                raise MgIndiaApiError(
+                    message or f"{action} command error code {result}"
+                )
+            event_id = dispatcher.get("eventID", event_id)
+            if attempt + 1 < CONTROL_POLL_ATTEMPTS:
+                await asyncio.sleep(CONTROL_POLL_DELAY)
+        raise MgIndiaApiError(f"{action} command did not complete after polling")
+
+    async def _control_request(
+        self,
+        vin: str,
+        event_id: int,
+        request_type: int,
+        params: list[tuple[int, bytes]],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        if self._token is None or self._user_id is None:
+            raise MgIndiaApiError("Not logged in")
+        try:
+            body = await asyncio.to_thread(
+                encode_control_request,
+                self._user_id,
+                self._token,
+                vin,
+                event_id,
+                request_type,
+                params,
+            )
+        except TapCodecError as err:
+            raise MgIndiaApiError(str(err)) from err
+        response = await self._http.post(
+            TAP_STATUS_URL, content=body, headers=tap_headers(body)
+        )
+        response.raise_for_status()
+        try:
+            return decode_control_response(response.text)
+        except TapCodecError as err:
+            raise MgIndiaApiError(str(err)) from err
+
     async def _status_request(
         self, vin: str, event_id: int
     ) -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -232,15 +444,9 @@ class MgIndiaClient:
             )
         except TapCodecError as err:
             raise MgIndiaApiError(str(err)) from err
-        headers = {
-            "User-Agent": USER_AGENT,
-            "Content-Type": "text/plain",
-            "Accept": "*/*",
-            "Accept-Language": "en-US;q=1",
-            "APP-SIGNATURE": tap_signature(body),
-            "SIGNATURE": "1",
-        }
-        response = await self._http.post(TAP_STATUS_URL, content=body, headers=headers)
+        response = await self._http.post(
+            TAP_STATUS_URL, content=body, headers=tap_headers(body)
+        )
         response.raise_for_status()
         try:
             return decode_status_response(response.text)
@@ -378,6 +584,26 @@ def tap_signature(body: str) -> str:
     return hmac.new(hmac_key.encode(), body.encode(), hashlib.sha256).hexdigest()
 
 
+def tap_headers(body: str) -> dict[str, str]:
+    return {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "text/plain",
+        "Accept": "*/*",
+        "Accept-Language": "en-US;q=1",
+        "APP-SIGNATURE": tap_signature(body),
+        "SIGNATURE": "1",
+    }
+
+
+def hash_control_pin(pin: str) -> str:
+    """Hash a numeric control PIN in the format expected by MG India."""
+
+    if not re.fullmatch(r"\d{4,8}", pin):
+        raise MgIndiaApiError("Control PIN must contain 4 to 8 digits")
+    normalized_pin = pin if len(pin) == 6 else f"{pin}00"
+    return hashlib.md5(normalized_pin.encode()).hexdigest().upper()
+
+
 def gateway_signature(signing_path: str, current_ts: str, content_type: str) -> str:
     key_part_one = md5_hex_digest(signing_path)
     encrypt_key = md5_hex_digest(key_part_one + current_ts + "1" + content_type)
@@ -437,9 +663,10 @@ def parse_vehicle_status(raw: dict[str, Any]) -> MgIndiaVehicleStatus:
         passenger_window_open=optional_bool(basic.get("passengerWindow")),
         rear_left_window_open=optional_bool(basic.get("rearLeftWindow")),
         rear_right_window_open=optional_bool(basic.get("rearRightWindow")),
-        climate_running=(basic.get("remoteClimateStatus") == 2)
+        climate_running=(basic.get("remoteClimateStatus") in (2, 3))
         if basic.get("remoteClimateStatus") is not None
         else None,
+        sunroof_open=optional_bool(basic.get("sunroofStatus")),
         can_bus_active=optional_bool(basic.get("canBusActive")),
     )
 

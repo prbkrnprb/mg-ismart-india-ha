@@ -106,8 +106,7 @@ def read_fixed_7bit_string(
     """Read a fixed-length 7-bit string at an absolute bit offset."""
 
     return "".join(
-        chr(read_bits(data, bit_offset + index * 7, 7))
-        for index in range(char_count)
+        chr(read_bits(data, bit_offset + index * 7, 7)) for index in range(char_count)
     )
 
 
