@@ -64,6 +64,18 @@ class MgIndiaVehicle:
 
 
 @dataclass(frozen=True)
+class MgIndiaGpsPosition:
+    """GPS position from the TAP status response."""
+
+    latitude: float | None
+    longitude: float | None
+    altitude: int | None
+    heading: int | None
+    speed: float | None
+    gps_fix: str | None
+
+
+@dataclass(frozen=True)
 class MgIndiaVehicleStatus:
     """Normalized read-only telemetry returned by the TAP status API."""
 
@@ -89,6 +101,10 @@ class MgIndiaVehicleStatus:
     climate_running: bool | None
     sunroof_open: bool | None
     can_bus_active: bool | None
+    charging: bool | None
+    engine_status: int | None
+    power_mode: int | None
+    gps: MgIndiaGpsPosition | None
 
 
 @dataclass(frozen=True)
@@ -643,6 +659,11 @@ def parse_vehicle_status(raw: dict[str, Any]) -> MgIndiaVehicleStatus:
     """Normalize protocol-513 status values into Home Assistant units."""
 
     basic = raw.get("basicVehicleStatus", {})
+    gps = parse_gps_position(raw.get("gpsPosition"))
+    engine_status = basic.get("engineStatus")
+    power_mode = basic.get("powerMode")
+    # engineStatus == 1 indicates the HV battery is being charged
+    charging = engine_status == 1 if isinstance(engine_status, int) else None
     return MgIndiaVehicleStatus(
         status_time=positive_int(raw.get("statusTime")),
         last_vehicle_activity=positive_int(basic.get("timeOfLastCANBUSActivity")),
@@ -668,6 +689,43 @@ def parse_vehicle_status(raw: dict[str, Any]) -> MgIndiaVehicleStatus:
         else None,
         sunroof_open=optional_bool(basic.get("sunroofStatus")),
         can_bus_active=optional_bool(basic.get("canBusActive")),
+        charging=charging,
+        engine_status=engine_status if isinstance(engine_status, int) else None,
+        power_mode=power_mode if isinstance(power_mode, int) else None,
+        gps=gps,
+    )
+
+
+def parse_gps_position(raw: dict[str, Any] | None) -> MgIndiaGpsPosition | None:
+    """Parse the gpsPosition block from a TAP status response."""
+
+    if not raw or not isinstance(raw, dict):
+        return None
+    waypoint = raw.get("wayPoint", {})
+    position = waypoint.get("position", {})
+    lat_raw = position.get("latitude")
+    lng_raw = position.get("longitude")
+    # Coordinates are in units of 1e-6 degrees
+    latitude = lat_raw / 1_000_000 if isinstance(lat_raw, int) else None
+    longitude = lng_raw / 1_000_000 if isinstance(lng_raw, int) else None
+    # Filter out zero/zero which means no fix
+    if latitude == 0.0 and longitude == 0.0:
+        latitude = None
+        longitude = None
+    altitude = position.get("altitude") if isinstance(position.get("altitude"), int) else None
+    heading = waypoint.get("heading") if isinstance(waypoint.get("heading"), int) else None
+    speed_raw = waypoint.get("speed")
+    speed = speed_raw / 10 if isinstance(speed_raw, int) and speed_raw >= 0 else None
+    gps_status = raw.get("gpsStatus")
+    gps_fix_map = {0: "no_signal", 1: "time_fix", 2: "2d_fix", 3: "3d_fix"}
+    gps_fix = gps_fix_map.get(gps_status) if isinstance(gps_status, (int, str)) else None
+    return MgIndiaGpsPosition(
+        latitude=latitude,
+        longitude=longitude,
+        altitude=altitude,
+        heading=heading,
+        speed=speed,
+        gps_fix=gps_fix,
     )
 
 

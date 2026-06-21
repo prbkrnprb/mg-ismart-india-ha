@@ -33,4 +33,5 @@ PLATFORMS = [
     "cover",
     "button",
     "select",
+    "device_tracker",
 ]
