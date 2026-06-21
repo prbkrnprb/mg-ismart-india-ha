@@ -26,6 +26,8 @@ controls supported by each vehicle's model configuration.
 - Lock state
 - Door, boot, bonnet, and window state
 - Remote climate and CAN bus activity
+- Charging status (binary sensor)
+- GPS location (device tracker with latitude, longitude, altitude, heading, speed)
 - Climate on/off
 - Door lock/unlock
 - Supported windows
@@ -48,9 +50,10 @@ from **Settings > Devices & services**.
   integration's **Configure** action. Only a one-way hash is stored.
 - Control entities are created dynamically from the vehicle's reported model
   configuration; unsupported hardware is not exposed.
-- Vehicle location is intentionally not exposed.
-- Tyre pressure and charging details remain unavailable until their separate
-  India encodings are validated.
+- Vehicle location is exposed via a device tracker entity with GPS coordinates.
+- Charging status is derived from the engine status field in the TAP response.
+- Tyre pressure details remain unavailable until their separate India encodings
+  are validated.
 - This project is independent from the generic MG SAIC integration because the
   India cloud uses a different TAP login and gateway signing flow.
 
